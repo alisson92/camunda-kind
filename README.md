@@ -87,56 +87,55 @@ Verifique com `docker info | grep -E 'CPUs|Memory'`.
 
 ## Instalação
 
-### 1. Criar o cluster Kind
-
-Se o cluster ainda não existe, use a configuração oficial da Camunda:
+### 1. Clonar e executar
 
 ```bash
-kind create cluster --config configs/kind-cluster-config.yaml
-```
-
-Verifique que os nós estão `Ready`:
-
-```bash
-kubectl get nodes
-```
-
-### 2. Ajuste obrigatório antes de instalar
-
-Abra `camunda/camunda-values.yaml` e localize `global.identity.auth.publicIssuerUrl`.
-Essa URL é usada pelo **browser** para redirect SSO. Ajuste para a porta que você vai
-usar no port-forward do Keycloak:
-
-```yaml
-# Exemplo com port-forward na porta 8086:
-global:
-  identity:
-    auth:
-      publicIssuerUrl: "http://localhost:8086/auth/realms/camunda-platform"
-```
-
-### 3. Executar a instalação
-
-```bash
-chmod +x install.sh
+git clone https://github.com/alisson92/camunda-kind.git
+cd camunda-kind
 ./install.sh
 ```
 
-O script executa 8 passos em sequência, cada um com verificação de pré-condições:
+O script cuida de tudo na ordem correta: cria o cluster Kind (se ainda não existir),
+adiciona os repositórios Helm, instala cada componente com health check entre os passos
+e exibe os port-forwards ao final.
 
-| Passo | O que faz | Por quê esta ordem |
-|---|---|---|
-| 0 | Preflight checks | Garante contexto e arquivos corretos antes de qualquer ação |
-| 1 | Adiciona repos Helm | Base para todos os installs subsequentes |
-| 2 | Cria namespaces | Namespaces precisam existir antes dos releases |
-| 3 | kube-prometheus-stack | **Primeiro**: instala os CRDs (ServiceMonitor) que o Camunda usa |
-| 4 | Elasticsearch | Antes do Camunda: Zeebe começa a exportar para o ES imediatamente |
-| 5 | PostgreSQL (×3) | Antes do Keycloak e do Camunda |
-| 6 | Keycloak | Antes do Identity: o Identity configura o Keycloak no startup |
-| 7 | Camunda Platform | **Último**: depende de toda a infraestrutura estar healthy |
-| 8 | Verificação final | Lista pods e todos os comandos port-forward |
+Tempo estimado: **15–25 minutos** (varia conforme velocidade de download das imagens).
 
-Tempo estimado de instalação: **15–25 minutos** (depende da velocidade de pull das imagens).
+### Retomar uma instalação interrompida
+
+Caso o script falhe em algum passo, você pode retomar de onde parou:
+
+```bash
+STEP=4 ./install.sh     # inicia a partir do passo 4 (inclusive)
+ONLY_STEP=6 ./install.sh  # executa apenas o passo 6
+DRY_RUN=1 ./install.sh  # exibe o que seria feito sem executar nada
+```
+
+| Passo | O que faz |
+|---|---|
+| 0 | Verifica ferramentas, cria o cluster Kind se necessário |
+| 1 | Adiciona repositórios Helm |
+| 2 | Cria namespaces |
+| 3 | kube-prometheus-stack (instala CRDs ServiceMonitor antes do Camunda) |
+| 4 | Elasticsearch |
+| 5 | PostgreSQL ×3 + banco `keycloak` |
+| 6 | Keycloak |
+| 7 | Camunda Platform 8.9 |
+| 8 | Verificação final + port-forwards |
+
+### `publicIssuerUrl` — único valor que pode precisar de ajuste
+
+Por padrão está configurado como `http://localhost:8086/auth/realms/camunda-platform`,
+que funciona com o port-forward do Keycloak na porta 8086 (conforme exibido no passo 8).
+Se você precisar de uma porta diferente, edite antes de rodar:
+
+```yaml
+# camunda/camunda-values.yaml
+global:
+  identity:
+    auth:
+      publicIssuerUrl: "http://localhost:<SUA_PORTA>/auth/realms/camunda-platform"
+```
 
 ## Acesso aos serviços
 
