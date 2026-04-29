@@ -137,60 +137,68 @@ global:
       publicIssuerUrl: "http://localhost:<SUA_PORTA>/auth/realms/camunda-platform"
 ```
 
-## Acesso aos serviços
+## Acesso às interfaces
 
-Todos os serviços são acessados via `kubectl port-forward`. Abra um terminal por serviço
-ou use uma ferramenta como [kubefwd](https://github.com/txn2/kubefwd) para fazer todos de uma vez.
+Todos os serviços são acessados via `kubectl port-forward`, pois não há Ingress neste
+ambiente local. Cada comando ocupa um terminal — mantenha-os abertos enquanto usar as interfaces.
 
-### Camunda Platform
+> **Importante:** o login SSO de todos os componentes passa pelo Keycloak.
+> O port-forward do Keycloak (porta 8086) **precisa estar ativo** antes de tentar
+> fazer login no Operate, Tasklist, Optimize ou Web Modeler.
 
+### Passo a passo para abrir as interfaces
+
+**Terminal 1 — Keycloak (obrigatório para login SSO)**
 ```bash
-# Zeebe gRPC (workers e clientes zbctl/SDK)
-kubectl -n camunda port-forward svc/camunda-zeebe-gateway 26500:26500
+kubectl -n camunda-infra port-forward svc/keycloak 8086:80
+```
 
-# Orchestration Cluster (Operate + Tasklist + REST API) → http://localhost:8080
-# - Operate  → http://localhost:8080/operate
-# - Tasklist → http://localhost:8080/tasklist
+**Terminal 2 — Operate e Tasklist**
+```bash
 kubectl -n camunda port-forward svc/camunda-zeebe-gateway 8080:8080
+```
+- Operate  → http://localhost:8080/operate
+- Tasklist → http://localhost:8080/tasklist
+- Credenciais: `demo` / `demo`
 
-# Optimize → http://localhost:8083
+> No Camunda 8.9, Operate e Tasklist rodam dentro do mesmo pod (Orchestration Cluster)
+> e são acessados pelo mesmo port-forward, em paths diferentes.
+
+**Terminal 3 — Optimize**
+```bash
 kubectl -n camunda port-forward svc/camunda-optimize 8083:80
+```
+- URL: http://localhost:8083
+- Credenciais: `demo` / `demo`
 
-# Identity → http://localhost:8084
-kubectl -n camunda port-forward svc/camunda-identity 8084:80
-
-# Web Modeler → http://localhost:8085
+**Terminal 4 — Web Modeler**
+```bash
 kubectl -n camunda port-forward svc/camunda-web-modeler-restapi 8085:80
 ```
+- URL: http://localhost:8085
+- Credenciais: `demo` / `demo`
 
-**Credenciais padrão:** `demo` / `demo`
-
-### Infraestrutura
-
+**Terminal 5 — Grafana (monitoramento)**
 ```bash
-# Keycloak Admin UI → http://localhost:8086  (admin / admin-secret)
-kubectl -n camunda-infra port-forward svc/keycloak 8086:80
-
-# Elasticsearch → http://localhost:9200
-kubectl -n camunda-infra port-forward svc/camunda-elasticsearch-master 9200:9200
-```
-
-**Keycloak:** `admin` / `admin-secret`
-
-### Monitoramento
-
-```bash
-# Grafana → http://localhost:3000
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
-
-# Prometheus → http://localhost:9090
-kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
-
-# Alertmanager → http://localhost:9093
-kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
 ```
+- URL: http://localhost:3000
+- Credenciais: `admin` / `grafana-secret`
 
-**Grafana:** `admin` / `grafana-secret`
+### Referência completa de port-forwards
+
+| Interface | Comando | URL | Credenciais |
+|---|---|---|---|
+| **Keycloak** (SSO — abrir primeiro) | `kubectl -n camunda-infra port-forward svc/keycloak 8086:80` | http://localhost:8086 | `admin` / `admin-secret` |
+| **Operate** | `kubectl -n camunda port-forward svc/camunda-zeebe-gateway 8080:8080` | http://localhost:8080/operate | `demo` / `demo` |
+| **Tasklist** | (mesmo port-forward do Operate) | http://localhost:8080/tasklist | `demo` / `demo` |
+| **Optimize** | `kubectl -n camunda port-forward svc/camunda-optimize 8083:80` | http://localhost:8083 | `demo` / `demo` |
+| **Identity** | `kubectl -n camunda port-forward svc/camunda-identity 8084:80` | http://localhost:8084 | `demo` / `demo` |
+| **Web Modeler** | `kubectl -n camunda port-forward svc/camunda-web-modeler-restapi 8085:80` | http://localhost:8085 | `demo` / `demo` |
+| **Grafana** | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80` | http://localhost:3000 | `admin` / `grafana-secret` |
+| **Prometheus** | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090` | http://localhost:9090 | — |
+| **Elasticsearch** | `kubectl -n camunda-infra port-forward svc/camunda-elasticsearch-master 9200:9200` | http://localhost:9200 | — |
+| **Zeebe gRPC** | `kubectl -n camunda port-forward svc/camunda-zeebe-gateway 26500:26500` | `localhost:26500` | — |
 
 ## Operações comuns
 
