@@ -219,34 +219,72 @@ should_run_step() {
 }
 
 # ----------------------------------------------------------------------------
-# PASSO 0 — Pré-requisitos
+# PASSO 0 — Pré-requisitos e criação do cluster Kind
+#
+# Cria o cluster Kind se ele não existir. Se já existir, apenas valida o estado.
+# Isso torna o script verdadeiramente "clone e execute" — não é necessário
+# criar o cluster manualmente antes de rodar o install.sh.
 # ----------------------------------------------------------------------------
 step_0_preflight() {
-  log_step "PASSO 0: Verificações de pré-requisitos"
+  log_step "PASSO 0: Verificações de pré-requisitos e cluster Kind"
 
-  local current_context
-  current_context=$(kubectl config current-context)
-  if [[ "${current_context}" != "${KUBE_CONTEXT}" ]]; then
-    log_error "Contexto kubectl incorreto: ${current_context}"
-    die "Esperado: ${KUBE_CONTEXT} — execute: kubectl config use-context ${KUBE_CONTEXT}"
-  fi
-  log_ok "Contexto kubectl: ${current_context}"
-
-  # Verifica nós: awk extrai a coluna STATUS e conta os que não são exatamente "Ready"
-  local not_ready
-  not_ready=$(kubectl get nodes --no-headers | awk '{print $2}' | grep -cv "^Ready$" || true)
-  if [[ "${not_ready}" -gt 0 ]]; then
-    kubectl get nodes
-    die "${not_ready} nó(s) não estão Ready"
-  fi
-  log_ok "Todos os nós estão Ready"
+  # Verifica ferramentas obrigatórias
+  for tool in kubectl helm kind; do
+    if ! command -v "${tool}" &>/dev/null; then
+      die "Ferramenta não encontrada: '${tool}'. Instale antes de continuar."
+    fi
+  done
+  log_ok "Ferramentas: kubectl, helm, kind encontrados"
 
   local helm_version
   helm_version=$(helm version --short 2>/dev/null | grep -oP 'v\d+\.\d+')
   log_ok "Helm ${helm_version}"
 
+  # Cria o cluster Kind se ainda não existir
+  local cluster_name="camunda-platform-local"
+  local kind_config="${SCRIPT_DIR}/configs/kind-cluster-config.yaml"
+
+  if kind get clusters 2>/dev/null | grep -q "^${cluster_name}$"; then
+    log_ok "Cluster Kind '${cluster_name}' já existe — pulando criação"
+  else
+    log_info "Cluster Kind '${cluster_name}' não encontrado — criando..."
+
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      log_dry "kind create cluster --config ${kind_config}"
+    else
+      kind create cluster --config "${kind_config}"
+      log_ok "Cluster Kind '${cluster_name}' criado"
+    fi
+  fi
+
+  # Garante que o contexto kubectl aponta para o cluster correto
+  local current_context
+  current_context=$(kubectl config current-context 2>/dev/null || echo "none")
+  if [[ "${current_context}" != "${KUBE_CONTEXT}" ]]; then
+    log_info "Contexto atual: '${current_context}' — alterando para '${KUBE_CONTEXT}'..."
+    if [[ "${DRY_RUN}" == "1" ]]; then
+      log_dry "kubectl config use-context ${KUBE_CONTEXT}"
+    else
+      kubectl config use-context "${KUBE_CONTEXT}" \
+        || die "Falha ao mudar contexto para '${KUBE_CONTEXT}'"
+    fi
+  fi
+  log_ok "Contexto kubectl: ${KUBE_CONTEXT}"
+
+  # Verifica nós: awk extrai a coluna STATUS e conta os que não são exatamente "Ready"
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    local not_ready
+    not_ready=$(kubectl get nodes --no-headers | awk '{print $2}' | grep -cv "^Ready$" || true)
+    if [[ "${not_ready}" -gt 0 ]]; then
+      kubectl get nodes
+      die "${not_ready} nó(s) não estão Ready"
+    fi
+    log_ok "Todos os nós estão Ready"
+  fi
+
   local values_files=(
     "${SCRIPT_DIR}/00-namespaces.yaml"
+    "${SCRIPT_DIR}/configs/kind-cluster-config.yaml"
     "${SCRIPT_DIR}/infra/elasticsearch-values.yaml"
     "${SCRIPT_DIR}/infra/postgresql-identity-values.yaml"
     "${SCRIPT_DIR}/infra/postgresql-webmodeler-values.yaml"
@@ -259,12 +297,12 @@ step_0_preflight() {
   local missing=0
   for f in "${values_files[@]}"; do
     if [[ ! -f "${f}" ]]; then
-      log_error "Values file não encontrado: ${f}"
+      log_error "Arquivo não encontrado: ${f}"
       missing=1
     fi
   done
   [[ "${missing}" -eq 0 ]] || exit 1
-  log_ok "Todos os values files encontrados"
+  log_ok "Todos os arquivos de configuração encontrados"
 }
 
 # ----------------------------------------------------------------------------
@@ -520,21 +558,28 @@ step_8_verify() {
   log_step "Port-forwards para acesso local"
   cat <<EOF
 
-  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-zeebe-gateway         26500:26500  # Zeebe gRPC
-  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-operate                8081:80     # http://localhost:8081
-  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-tasklist               8082:80     # http://localhost:8082
-  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-optimize               8083:80     # http://localhost:8083
-  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-identity               8084:80     # http://localhost:8084
-  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-web-modeler-webapp     8085:80     # http://localhost:8085
-  kubectl -n ${NS_INFRA}      port-forward svc/keycloak                       8086:80     # http://localhost:8086
-  kubectl -n ${NS_INFRA}      port-forward svc/elasticsearch-master           9200:9200   # http://localhost:9200
-  kubectl -n ${NS_MONITORING} port-forward svc/kube-prometheus-stack-grafana  3000:80     # http://localhost:3000
-  kubectl -n ${NS_MONITORING} port-forward svc/kube-prometheus-stack-prometheus 9090:9090 # http://localhost:9090
+  # Camunda Platform — abra um terminal por comando
+  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-zeebe-gateway            26500:26500  # Zeebe gRPC (workers/SDK)
+  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-zeebe-gateway             8080:8080   # Operate → /operate  Tasklist → /tasklist
+  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-optimize                  8083:80     # http://localhost:8083
+  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-identity                  8084:80     # http://localhost:8084
+  kubectl -n ${NS_CAMUNDA}    port-forward svc/camunda-web-modeler-restapi       8085:80     # http://localhost:8085
+
+  # Infraestrutura
+  kubectl -n ${NS_INFRA}      port-forward svc/keycloak                          8086:80     # http://localhost:8086
+  kubectl -n ${NS_INFRA}      port-forward svc/camunda-elasticsearch-master      9200:9200   # http://localhost:9200
+
+  # Observabilidade
+  kubectl -n ${NS_MONITORING} port-forward svc/kube-prometheus-stack-grafana     3000:80     # http://localhost:3000
+  kubectl -n ${NS_MONITORING} port-forward svc/kube-prometheus-stack-prometheus  9090:9090   # http://localhost:9090
 
   Credenciais padrão:
     Camunda (Operate/Tasklist/etc.): demo / demo
     Keycloak admin:                  admin / admin-secret
     Grafana:                         admin / grafana-secret
+
+  NOTA: No Camunda 8.9, Operate e Tasklist rodam dentro do pod camunda-zeebe-0.
+        Acesse via http://localhost:8080/operate e http://localhost:8080/tasklist.
 EOF
 }
 

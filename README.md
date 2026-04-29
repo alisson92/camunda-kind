@@ -213,9 +213,13 @@ kubectl get servicemonitors -n camunda-infra
 ### Reiniciar um componente
 
 ```bash
-# Exemplo: reiniciar o Operate sem afetar os outros
-kubectl -n camunda rollout restart deployment/camunda-operate
-kubectl -n camunda rollout status deployment/camunda-operate
+# Exemplo: reiniciar o Identity sem afetar os outros
+kubectl -n camunda rollout restart deployment/camunda-identity
+kubectl -n camunda rollout status deployment/camunda-identity
+
+# Reiniciar o Orchestration Cluster (Zeebe + Operate + Tasklist)
+kubectl -n camunda rollout restart statefulset/camunda-zeebe
+kubectl -n camunda rollout status statefulset/camunda-zeebe
 ```
 
 ### Ver logs de um componente
