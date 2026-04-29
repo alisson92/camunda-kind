@@ -1,0 +1,244 @@
+# =============================================================================
+# monitoring/prometheus-values.yaml
+#
+# Chart: prometheus-community/kube-prometheus-stack
+#
+# Por que instalar ANTES do Camunda?
+# O kube-prometheus-stack instala CRDs como ServiceMonitor, PodMonitor,
+# PrometheusRule. O chart do Camunda cria objetos ServiceMonitor durante
+# seu install — se os CRDs não existirem ainda, o install do Camunda falha.
+# Ordem obrigatória: kube-prometheus-stack → Camunda
+#
+# O que o kube-prometheus-stack instala:
+# - Prometheus Operator: controller que gerencia instâncias de Prometheus
+# - Prometheus: coleta de métricas dos targets descobertos via ServiceMonitor
+# - Grafana: dashboards e visualização
+# - Alertmanager: roteamento e agrupamento de alertas
+# - node-exporter: métricas dos nós Kubernetes
+# - kube-state-metrics: métricas de objetos Kubernetes (pods, deployments, etc.)
+# =============================================================================
+
+# ----------------------------------------------------------------------------
+# Prometheus Operator
+# O Operator é o controller que lê os CRDs (ServiceMonitor, PrometheusRule)
+# e reconfigura o Prometheus dinamicamente sem restart
+# ----------------------------------------------------------------------------
+prometheusOperator:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+  # CRÍTICO: define em quais namespaces o Operator vai procurar ServiceMonitors
+  # "" = todos os namespaces — necessário para descobrir os ServiceMonitors
+  # que o Camunda cria no namespace "camunda"
+  namespaces:
+    releaseNamespace: true
+    additional:
+      - camunda
+      - camunda-infra
+
+# ----------------------------------------------------------------------------
+# Prometheus
+# ----------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # CRÍTICO: o Prometheus Operator só "enxerga" ServiceMonitors que tenham
+    # labels correspondendo a este seletor.
+    # O chart do Camunda cria ServiceMonitors com:
+    #   labels:
+    #     release: kube-prometheus-stack
+    # Este seletor garante que esses ServiceMonitors sejam coletados.
+    serviceMonitorSelector:
+      matchLabels:
+        release: kube-prometheus-stack
+
+    # Descobre ServiceMonitors em todos os namespaces (não só no monitoring)
+    serviceMonitorNamespaceSelector: {}
+
+    # Mesmo para PodMonitors
+    podMonitorSelector:
+      matchLabels:
+        release: kube-prometheus-stack
+
+    podMonitorNamespaceSelector: {}
+
+    # Retenção de dados — reduzida para local (não precisamos de histórico longo)
+    # Em produção: 30d ou mais, com storage dedicado
+    retention: 7d
+
+    # Persistência — habilitamos para não perder dados ao reiniciar o pod
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          # StorageClass default do Kind (local-path)
+          # Em produção (EKS): storageClassName: "gp3"
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "2Gi"
+
+    # Scrape interval — frequência de coleta de métricas
+    # 30s é adequado para local; em produção use 15s ou 30s
+    scrapeInterval: "30s"
+
+    # Evaluation interval — frequência de avaliação de PrometheusRules (alertas)
+    evaluationInterval: "30s"
+
+  # Service do Prometheus — ClusterIP, acesso via port-forward
+  service:
+    type: ClusterIP
+    port: 9090
+
+# ----------------------------------------------------------------------------
+# Grafana
+# ----------------------------------------------------------------------------
+grafana:
+  enabled: true
+
+  # Credenciais de acesso ao Grafana
+  # Em produção: use um Secret externo, nunca plaintext no values
+  adminUser: "admin"
+  adminPassword: "grafana-secret"
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # Persistência — habilita para salvar dashboards customizados entre restarts
+  persistence:
+    enabled: true
+    type: pvc
+    # StorageClass default do Kind
+    size: 2Gi
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  # Datasource do Prometheus pré-configurado
+  # O Grafana já vem apontando para o Prometheus do mesmo stack
+  sidecar:
+    dashboards:
+      enabled: true
+      # Descobre ConfigMaps com label grafana_dashboard: "1" em qualquer namespace
+      # Isso permite adicionar dashboards do Camunda facilmente depois
+      searchNamespace: "ALL"
+      label: "grafana_dashboard"
+      labelValue: "1"
+    datasources:
+      enabled: true
+
+  # Ingress desabilitado — acesso via port-forward:
+  # kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+  ingress:
+    enabled: false
+
+# ----------------------------------------------------------------------------
+# Alertmanager
+# ----------------------------------------------------------------------------
+alertmanager:
+  enabled: true
+
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "200m"
+        memory: "128Mi"
+
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi
+
+  service:
+    type: ClusterIP
+
+# ----------------------------------------------------------------------------
+# Node Exporter — coleta métricas dos nós (CPU, memória, disco, rede)
+# Roda como DaemonSet em todos os nós do cluster
+# ----------------------------------------------------------------------------
+nodeExporter:
+  enabled: true
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# ----------------------------------------------------------------------------
+# Kube State Metrics — coleta métricas de objetos Kubernetes
+# (estado de pods, deployments, statefulsets, etc.)
+# Essencial para saber se os pods do Camunda estão healthy
+# ----------------------------------------------------------------------------
+kubeStateMetrics:
+  enabled: true
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+# ----------------------------------------------------------------------------
+# Dashboards padrão — o kube-prometheus-stack vem com dashboards prontos
+# para monitorar o próprio cluster Kubernetes
+# ----------------------------------------------------------------------------
+defaultRules:
+  create: true
+  rules:
+    alertmanager: true
+    etcd: true
+    configReloaders: true
+    general: true
+    k8s: true
+    kubeApiserverAvailability: true
+    kubeApiserverBurnrate: true
+    kubeApiserverHistogram: true
+    kubeApiserverSlos: true
+    kubeControllerManager: true
+    kubelet: true
+    kubeProxy: true
+    kubePrometheusGeneral: true
+    kubePrometheusNodeRecording: true
+    kubernetesApps: true
+    kubernetesResources: true
+    kubernetesStorage: true
+    kubernetesSystem: true
+    kubeSchedulerAlerting: true
+    kubeSchedulerRecording: true
+    kubeStateMetrics: true
+    network: true
+    node: true
+    nodeExporterAlerting: true
+    nodeExporterRecording: true
+    prometheus: true
+    prometheusOperator: true

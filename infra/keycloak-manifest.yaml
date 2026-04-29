@@ -1,0 +1,158 @@
+# =============================================================================
+# infra/keycloak-manifest.yaml
+#
+# Keycloak 26.x via imagem oficial quay.io/keycloak/keycloak
+#
+# Por que não bitnami/keycloak?
+# A partir de agosto de 2025, a Bitnami exige assinatura paga para acessar
+# novas imagens no Docker Hub. A imagem quay.io/keycloak/keycloak é mantida
+# pelo projeto Keycloak (Red Hat) e sempre gratuita.
+#
+# Compatibilidade com Camunda 8.9:
+# - KC_HTTP_RELATIVE_PATH=/auth → mantém o path /auth/realms/... esperado
+#   pelo Camunda Identity (publicIssuerUrl usa esse prefixo)
+# - KC_DB=postgres → conecta ao PostgreSQL externo no namespace camunda-infra
+# - start-dev → modo de desenvolvimento: HTTP habilitado, sem TLS obrigatório,
+#   sem strict hostname — adequado para Kind local
+#
+# ATENÇÃO para produção: use "start" (não "start-dev") com TLS e hostname
+# configurados corretamente. start-dev desabilita otimizações do Quarkus.
+#
+# NOTAS DE PORTA E HEALTH:
+# - KC 26.x separa a porta de aplicação (8080) da porta de management (9000)
+# - ATENÇÃO: KC_HTTP_RELATIVE_PATH=/auth afeta AMBAS as portas (8080 E 9000)
+#   Endpoints de health ficam em :9000/AUTH/health/live (NÃO em /health/live)
+# - KC_HEALTH_ENABLED=true é obrigatório para subir a interface de management (9000)
+# - livenessProbe:  :9000/auth/health/live  (management port com prefixo /auth)
+# - readinessProbe: :8080/auth/realms/master (confirma que a app está servindo)
+# =============================================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: camunda-infra
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/instance: keycloak
+    app.kubernetes.io/component: keycloak
+spec:
+  type: ClusterIP
+  ports:
+    # Porta 80 exposta para o Camunda (aponta para 8080 no pod)
+    # O Camunda conecta via keycloak.camunda-infra.svc.cluster.local:80
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/instance: keycloak
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak
+  namespace: camunda-infra
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/instance: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: keycloak
+  serviceName: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/instance: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          # Imagem oficial — sempre gratuita e atualizada pelo projeto Keycloak
+          image: quay.io/keycloak/keycloak:26.3.3
+          args:
+            # start-dev: HTTP habilitado por padrão, sem strict hostname, sem TLS
+            # Adequado para Kind local — não use em produção
+            - start-dev
+          env:
+            # --- Banco de dados externo ---
+            - name: KC_DB
+              value: postgres
+            # JDBC URL apontando para o banco "keycloak" no postgresql-identity
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://postgresql-identity.camunda-infra.svc.cluster.local:5432/keycloak"
+            - name: KC_DB_USERNAME
+              value: identity
+            - name: KC_DB_PASSWORD
+              value: identity-secret
+
+            # --- Admin inicial (criado apenas no primeiro boot) ---
+            - name: KEYCLOAK_ADMIN
+              value: admin
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              value: admin-secret
+
+            # --- Path /auth para compatibilidade com Camunda Identity ---
+            # O Identity espera /auth/realms/camunda-platform como issuer URL.
+            # A partir do KC 17, o path padrão é "/" — este env restaura "/auth".
+            # Afeta apenas a porta de aplicação (8080), NÃO a porta de management (9000).
+            - name: KC_HTTP_RELATIVE_PATH
+              value: "/auth"
+
+            # --- Configurações de hostname (relaxadas para local) ---
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HOSTNAME_STRICT_HTTPS
+              value: "false"
+
+            - name: KC_LOG_LEVEL
+              value: INFO
+
+            # Habilita os endpoints de health na porta de management (9000).
+            # Sem esta flag, a porta 9000 não é aberta — /health/live retorna 404 em 8080.
+            # KC_HEALTH_ENABLED ativa o management interface do Quarkus (porta 9000).
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Porta de management do Quarkus — health e métricas (não afetada por KC_HTTP_RELATIVE_PATH)
+            - name: management
+              containerPort: 9000
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+          # Readiness probe: /auth/realms/master na porta 8080.
+          # KC_HTTP_RELATIVE_PATH=/auth faz o KC servir os realms em /auth/realms/...
+          readinessProbe:
+            httpGet:
+              path: /auth/realms/master
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+
+          # Liveness probe: /auth/health/live na porta 9000 (management port).
+          # ATENÇÃO: KC_HTTP_RELATIVE_PATH=/auth afeta TAMBÉM o management port (9000).
+          # Portanto o path correto é /auth/health/live (NÃO /health/live).
+          # Confirmado por teste direto via bash TCP redirect no pod em produção.
+          livenessProbe:
+            httpGet:
+              path: /auth/health/live
+              port: management
+            initialDelaySeconds: 90
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10

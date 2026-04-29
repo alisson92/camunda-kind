@@ -1,0 +1,194 @@
+# =============================================================================
+# infra/elasticsearch-values.yaml
+#
+# Chart: elastic/elasticsearch
+# Versão alvo: 8.18.x (compatível com Camunda 8.9 — ver version matrix oficial)
+#
+# Por que Elasticsearch externo ao chart Camunda?
+# A partir do 8.9, o modelo de produção da Camunda assume infraestrutura
+# gerenciada independentemente. Em EKS você usaria Amazon OpenSearch ou
+# Elastic Cloud. Aqui reproduzimos esse isolamento com um chart separado
+# no namespace camunda-infra.
+#
+# Referência: https://helm.camunda.io/camunda-platform/version-matrix/camunda-8.9
+# Imagem compatível: docker.io/bitnamilegacy/elasticsearch:8.18.0
+# =============================================================================
+
+# ----------------------------------------------------------------------------
+# Configuração do cluster Elasticsearch
+# Para ambiente local usamos single-node (1 master que também é data node)
+# Em produção você teria: 3 master nodes + N data nodes separados
+# ----------------------------------------------------------------------------
+replicas: 1
+
+# Versão da imagem — deve bater com a version matrix do Camunda 8.9
+image: "elasticsearch"
+imageTag: "8.18.0"
+
+# Single node: sem necessidade de quorum de master
+# Em produção: minimum_master_nodes = (N/2)+1
+clusterName: "camunda-elasticsearch"
+nodeGroup: "master"
+
+# Roles do nó: em single-node, o mesmo nó assume todos os papéis
+# Em produção esses papéis seriam separados em node groups distintos
+roles:
+  - master
+  - data
+  - data_content
+  - data_hot
+  - ingest
+
+# ----------------------------------------------------------------------------
+# Segurança — DESABILITADA para ambiente local (HTTP puro, sem TLS)
+#
+# O chart elastic/elasticsearch 8.x tem TWO mecanismos de segurança:
+#   1. esConfig: elasticsearch.yml — arquivo de configuração montado no pod
+#   2. Env vars injetadas pelo chart (xpack.security.* como variáveis de ambiente)
+#
+# PROBLEMA: env vars têm precedência sobre o config file no ES 8.x.
+# O chart, por padrão, injeta xpack.security.enabled=true via env var E gera
+# certificados TLS automáticos (createCert: true, protocol: https).
+# Isso faz o ES rodar em HTTPS mesmo com "xpack.security.enabled: false" no yml.
+#
+# SOLUÇÃO: setar protocol: http + createCert: false no chart.
+# Isso instrui o chart a NÃO gerar certificados e NÃO injetar env vars de TLS.
+# O esConfig abaixo é mantido como defense-in-depth, mas protocol: http é o fix real.
+#
+# ATENÇÃO: NUNCA use protocol: http em produção. Use TLS + autenticação real.
+# ----------------------------------------------------------------------------
+
+# protocol: http desabilita a geração automática de certs TLS pelo chart
+# e impede a injeção de env vars xpack.security.*.enabled=true no pod
+protocol: http
+
+# createCert: false impede o chart de criar o secret de certificados TLS
+# (elasticsearch-master-certs) que também forçaria o uso de HTTPS
+createCert: false
+
+esConfig:
+  elasticsearch.yml: |
+    # Desabilita segurança xpack — defense-in-depth além do protocol: http
+    # Em produção: remova e configure xpack.security.enabled: true com TLS
+    xpack.security.enabled: false
+    xpack.security.http.ssl.enabled: false
+    xpack.security.transport.ssl.enabled: false
+    # Permite que o Camunda conecte sem autenticação
+    http.cors.enabled: true
+    http.cors.allow-origin: "*"
+
+# O chart elastic/elasticsearch tem DUAS fontes que injetam cluster.initial_master_nodes:
+#   Fonte 1: automática quando nodeGroup == "master" (sempre ativa aqui)
+#   Fonte 2: lista explícita via clusterInitialMasterNodes (desativada abaixo com [])
+#
+# No ES 8.x, cluster.initial_master_nodes é INCOMPATÍVEL com discovery.type=single-node.
+# A solução correta para single-node com este chart é:
+#   - Manter nodeGroup: "master" (necessário para o nome do service/StatefulSet)
+#   - NÃO definir discovery.type=single-node (removido do extraEnvs)
+#   - O chart gera cluster.initial_master_nodes=<pod-name> + discovery.seed_hosts
+#   - Com replicas: 1, o nó descobre apenas a si mesmo e elege-se master
+clusterInitialMasterNodes: []  # desativa a Fonte 2 para evitar injeção duplicada
+
+# Variáveis de ambiente adicionais
+extraEnvs:
+  # Limita o uso de memória virtual do ES (necessário em alguns ambientes Linux)
+  - name: "bootstrap.memory_lock"
+    value: "false"
+  # Nota: discovery.seed_hosts NÃO pode ser sobrescrito via extraEnvs — o chart já
+  # injeta esse env var, e o Kubernetes rejeita duplicatas no spec do container.
+  # O WARN "configured as if to discover other nodes" nos logs é inofensivo:
+  # o cluster forma-se como single-node e fica GREEN normalmente.
+
+# ----------------------------------------------------------------------------
+# Recursos — calibrados para o seu ambiente (5 CPUs / ~15GB RAM)
+# O Elasticsearch é o componente mais faminto de memória da stack
+# Heap do JVM = metade do limit de memória (regra geral do ES)
+# ----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2000m"
+    memory: "2Gi"
+
+# Tamanho do heap JVM — deve ser metade do memory limit
+# 1Gi = metade de 2Gi (limit acima)
+esJavaOpts: "-Xmx1g -Xms1g"
+
+# ----------------------------------------------------------------------------
+# Persistência — StorageClass "standard" é o default do Kind (local-path)
+# Em produção (EKS): storageClassName: "gp3" ou "gp2"
+# O PVC é criado automaticamente pelo chart
+# ----------------------------------------------------------------------------
+persistence:
+  enabled: true
+  # Não especificamos storageClassName para usar o default do cluster (standard)
+  # Se quiser ser explícito: storageClassName: "standard"
+  accessModes:
+    - ReadWriteOnce
+  size: "10Gi"  # Reduzido para local — em produção use 100Gi+
+
+# ----------------------------------------------------------------------------
+# Service — ClusterIP para acesso interno ao cluster
+# O Camunda vai se conectar via: elasticsearch-master.camunda-infra.svc.cluster.local:9200
+# Não precisamos de LoadBalancer/NodePort — acesso apenas dentro do cluster
+# ----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 9200
+  # Porta de comunicação interna entre nós do cluster ES
+  transportPort: 9300
+
+# ----------------------------------------------------------------------------
+# Health checks — configurados para single-node local
+# Em produção os timeouts seriam menores (cluster forma quorum mais rápido)
+# ----------------------------------------------------------------------------
+readinessProbe:
+  failureThreshold: 3
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  successThreshold: 3
+  timeoutSeconds: 5
+
+# Desabilita a verificação de anti-affinity (não faz sentido em single-node)
+antiAffinity: "soft"
+
+# Sem tolerations específicos para local
+tolerations: []
+
+# Sem nodeSelector — no Kind todos os nós aceitam qualquer pod
+nodeSelector: {}
+
+# ----------------------------------------------------------------------------
+# Init container: sysctl para ajustar vm.max_map_count
+# O Elasticsearch exige vm.max_map_count >= 262144
+# Isso é um requisito do kernel Linux, não do Kubernetes
+# O init container precisa de privilégios para executar o sysctl
+# ----------------------------------------------------------------------------
+sysctlInitContainer:
+  enabled: true
+
+# Permite que o init container rode como root para executar sysctl
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# ----------------------------------------------------------------------------
+# Ingress — desabilitado, acesso via port-forward ou ClusterIP interno
+# ----------------------------------------------------------------------------
+ingress:
+  enabled: false
+
+# ----------------------------------------------------------------------------
+# Kibana — desabilitado, não precisamos de UI para o ES neste contexto
+# ----------------------------------------------------------------------------
+kibana:
+  enabled: false

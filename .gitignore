@@ -1,0 +1,19 @@
+# Claude Code — configurações locais de permissão (não compartilhar)
+.claude/settings.local.json
+
+# Arquivos temporários e de sistema
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Arquivos gerados por ferramentas locais
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+# Credenciais e segredos (nunca versionar)
+*.env
+secrets/
+*.secret
+kubeconfig

@@ -1,0 +1,87 @@
+# =============================================================================
+# infra/postgresql-identity-values.yaml
+#
+# Chart: bitnami/postgresql
+# Instância: PostgreSQL dedicada ao componente Identity do Camunda
+#
+# Por que uma instância por componente?
+# Em produção você teria instâncias RDS separadas para Identity, Web Modeler
+# e Optimize — cada uma com seu próprio endpoint, credenciais, backup policy
+# e sizing independente. Reproduzimos esse isolamento localmente com 3
+# deployments PostgreSQL distintos no namespace camunda-infra.
+#
+# O Identity usa PostgreSQL para armazenar:
+# - Usuários, grupos e permissões da plataforma Camunda
+# - Configurações de aplicações registradas no Identity
+# - Tokens e sessões do Keycloak (via integração)
+# =============================================================================
+
+# ----------------------------------------------------------------------------
+# Configuração do banco de dados
+# Estas credenciais serão referenciadas no camunda-values.yaml
+# na seção identity.postgresql
+# ----------------------------------------------------------------------------
+auth:
+  # Nome do banco de dados que o Identity vai usar
+  database: "identity"
+  # Usuário dedicado — boa prática: um usuário por aplicação, nunca use postgres
+  username: "identity"
+  # Senha — para local está em plaintext; em produção use Sealed Secrets ou ESO
+  password: "identity-secret"
+  # Senha do superusuário postgres (necessária para criação do banco)
+  postgresPassword: "postgres-admin-secret"
+
+# ----------------------------------------------------------------------------
+# Recursos — PostgreSQL do Identity é o menos exigente dos três
+# O Identity não tem workloads de análise, apenas CRUD de identidades
+# ----------------------------------------------------------------------------
+primary:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # Persistência — StorageClass default do Kind (local-path / standard)
+  # Em produção (EKS): storageClassName: "gp3"
+  persistence:
+    enabled: true
+    size: "2Gi"  # Identity não armazena grandes volumes de dados
+
+  # Configurações do PostgreSQL
+  # Estas são otimizações básicas para workload OLTP leve
+  configuration: |
+    # Aceita conexões de qualquer interface — necessário para pods cross-namespace
+    # Bitnami PG 18.x não seta listen_addresses por padrão, resultando em 'localhost'
+    listen_addresses = '*'
+    # Tamanho do buffer compartilhado — 25% da RAM disponível para o pod
+    shared_buffers = 128MB
+    # Máximo de conexões simultâneas
+    max_connections = 50
+    # Log de queries lentas (útil para debug local)
+    log_min_duration_statement = 1000
+
+# ----------------------------------------------------------------------------
+# Modo standalone — sem replicação
+# Em produção você teria primary + pelo menos 1 replica para HA
+# Para local, single instance é suficiente
+# ----------------------------------------------------------------------------
+architecture: standalone
+
+# ----------------------------------------------------------------------------
+# Service — ClusterIP interno
+# O Identity vai conectar via:
+# postgresql-identity.camunda-infra.svc.cluster.local:5432
+# ----------------------------------------------------------------------------
+primary:
+  service:
+    type: ClusterIP
+    ports:
+      postgresql: 5432
+
+# Sem métricas habilitadas para simplificar — pode habilitar depois
+# se quiser dashboards de PostgreSQL no Grafana
+metrics:
+  enabled: false

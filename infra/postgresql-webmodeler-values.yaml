@@ -1,0 +1,46 @@
+# =============================================================================
+# infra/postgresql-webmodeler-values.yaml
+#
+# Chart: bitnami/postgresql
+# Instância: PostgreSQL dedicada ao componente Web Modeler do Camunda
+#
+# O Web Modeler usa PostgreSQL para armazenar:
+# - Projetos e arquivos BPMN/DMN/Form criados pelos usuários
+# - Histórico de versões dos diagramas
+# - Colaboração em tempo real (metadados de sessão)
+# - Configurações de deploy para os clusters Zeebe
+#
+# Por isso o Web Modeler tende a ter um banco com crescimento gradual
+# proporcional ao uso da ferramenta de modelagem
+# =============================================================================
+
+auth:
+  database: "webmodeler"
+  username: "webmodeler"
+  password: "webmodeler-secret"
+  postgresPassword: "postgres-admin-secret"
+
+primary:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  persistence:
+    enabled: true
+    size: "2Gi"
+
+  configuration: |
+    # Aceita conexões de qualquer interface — necessário para pods cross-namespace
+    listen_addresses = '*'
+    shared_buffers = 128MB
+    max_connections = 50
+    log_min_duration_statement = 1000
+
+architecture: standalone
+
+metrics:
+  enabled: false

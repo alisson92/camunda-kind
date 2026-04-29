@@ -1,0 +1,827 @@
+# =============================================================================
+# camunda/camunda-values.yaml
+#
+# Chart: camunda/camunda-platform
+# Versão: 14.0.0 (Camunda 8.9.0)
+# Helm CLI recomendado: 3.20.1 (compatível com Helm 4.x)
+#
+# Este arquivo é derivado do values.yaml COMPLETO do chart 14.0.0
+# com ajustes para:
+# 1. Infraestrutura externa (ES, PG, Keycloak) em vez de sub-charts embutidos
+# 2. Recursos calibrados para Kind local (5 CPUs / ~15GB RAM)
+# 3. Todos os componentes habilitados (Zeebe, Operate, Tasklist, Optimize,
+#    Identity, Web Modeler, Connectors)
+# 4. ServiceMonitors habilitados para integração com kube-prometheus-stack
+#
+# ATENÇÃO: A partir do Camunda 8.9, os sub-charts de infraestrutura
+# (Elasticsearch, PostgreSQL, Keycloak) são DESABILITADOS por padrão.
+# As seções "elasticsearch", "postgresql" e "keycloak" abaixo configuram
+# a CONEXÃO com as instâncias externas que instalamos separadamente.
+# =============================================================================
+
+
+# ===========================================================================
+# GLOBAL
+# Configurações que se aplicam a todos os componentes do chart
+# ===========================================================================
+global:
+  # Imagem base do Camunda 8.9
+  image:
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+    # Sem imagePullSecrets — usamos imagens públicas do Docker Hub
+    # Em produção com enterprise: configure aqui o secret do registry.camunda.cloud
+    pullSecrets: []
+
+  # Fuso horário dos pods — ajuste conforme necessário
+  # Em produção: UTC é o padrão recomendado
+  timezone: "America/Sao_Paulo"
+
+  # ----------------------------------------------------------------------------
+  # Identity — configuração global do provedor de identidade
+  # O Identity é o componente que integra todos os outros com o Keycloak
+  # ----------------------------------------------------------------------------
+  identity:
+    # Habilita o Identity como provedor de autenticação central
+    # Quando habilitado, Operate/Tasklist/Optimize exigem login via SSO
+    auth:
+      enabled: true
+
+      # URL pública do Keycloak — usada pelos BROWSERS para redirecionamento SSO.
+      # DEVE ser um endereço que o browser consegue resolver.
+      # Para Kind local com port-forward na porta 8086:
+      # kubectl -n camunda-infra port-forward svc/keycloak 8086:80
+      publicIssuerUrl: "http://localhost:8086/auth/realms/camunda-platform"
+
+      # Realm do Keycloak que o Camunda vai usar/criar
+      # O Identity cria este realm automaticamente no primeiro boot
+      realm: "camunda-platform"
+
+      # URL interna do Keycloak (service-to-service dentro do cluster)
+      # Formato: http://<service-name>.<namespace>.svc.cluster.local:<port>
+      tokenUrl: "http://keycloak.camunda-infra.svc.cluster.local/auth/realms/camunda-platform/protocol/openid-connect/token"
+
+      # ----------------------------------------------------------------------------
+      # Secrets dos clients Keycloak por componente.
+      # O Identity valida que todo componente habilitado possui um client secret
+      # configurado antes de inicializar. Em Keycloak interno os secrets são
+      # auto-gerados; com Keycloak externo devemos fornecê-los explicitamente.
+      # Para local/dev: inlineSecret. Produção: existingSecret.
+      # ----------------------------------------------------------------------------
+      optimize:
+        secret:
+          # Secret do client "optimize" no Keycloak — criado pelo Identity no 1º boot
+          inlineSecret: "optimize-identity-secret"
+
+    # ----------------------------------------------------------------------------
+    # Keycloak externo — configuração da instância que o Identity vai gerenciar.
+    # A partir do chart 14.0.0, "identity.keycloak" foi renomeado para
+    # "identityKeycloak" (sub-chart embutido). Para Keycloak externo, use
+    # "global.identity.keycloak" com url + auth conforme abaixo.
+    # O sub-chart "identityKeycloak" fica desabilitado (identityKeycloak.enabled: false).
+    # ----------------------------------------------------------------------------
+    keycloak:
+      # Keycloak externo no namespace camunda-infra — sem TLS, em modo start-dev
+      url:
+        protocol: "http"
+        host: "keycloak.camunda-infra.svc.cluster.local"
+        port: 80
+      # contextPath restaura o path /auth (necessário para KC 17+)
+      contextPath: "/auth"
+      # realm path (incluindo barra inicial)
+      realm: "/realms/camunda-platform"
+      auth:
+        adminUser: "admin"
+        # A partir do chart 14.0.0, adminPassword plain-text foi substituído por secret.
+        # Para local/dev: use inlineSecret. Produção: existingSecret + existingSecretKey.
+        secret:
+          inlineSecret: "admin-secret"
+
+  # ----------------------------------------------------------------------------
+  # Elasticsearch — conexão com o cluster externo no namespace camunda-infra
+  # ----------------------------------------------------------------------------
+  elasticsearch:
+    # Desabilitamos o sub-chart embutido — usamos o chart externo
+    disableExternalElasticsearch: false
+
+    # Conexão com o Elasticsearch externo
+    # Formato: <service-name>.<namespace>.svc.cluster.local
+    url:
+      protocol: "http"
+      host: "camunda-elasticsearch-master.camunda-infra.svc.cluster.local"
+      port: 9200
+
+    # Sem autenticação — configuramos o ES local sem xpack.security
+    # Em produção: configure username/password ou API key
+    auth:
+      enabled: false
+      # username: "elastic"
+      # existingSecret: ""
+      # existingSecretKey: ""
+
+# ===========================================================================
+# ORCHESTRATION
+# Obrigatório a partir do chart 14.0.0 (Camunda 8.9).
+# Define o tipo de storage secundário usado pelos componentes de orquestração
+# (Operate, Tasklist, Optimize) para persistência de dados de processo.
+# Valores disponíveis: elasticsearch | opensearch | rdbms
+# ===========================================================================
+orchestration:
+  # clusterSize=1 para Kind local (single-node Zeebe).
+  # O default do chart 14.0.0 é "3" (quorum de produção).
+  # replicationFactor e partitionCount devem ser <= clusterSize.
+  clusterSize: "1"
+  partitionCount: "1"
+  replicationFactor: "1"
+
+  data:
+    secondaryStorage:
+      # Obrigatório no chart 14.0.0: define o storage secundário da orquestração.
+      # Para local usamos o Elasticsearch externo no namespace camunda-infra.
+      type: elasticsearch
+
+
+# ===========================================================================
+# ZEEBE — Motor de orquestração de processos (core do Camunda)
+# O Zeebe é um workflow engine distribuído baseado em RAFT consensus
+# ===========================================================================
+zeebe:
+  enabled: true
+
+  # Número de brokers — em produção use 3 (quorum RAFT)
+  # Para local: 1 broker é suficiente (sem HA, mas funciona)
+  clusterSize: 1
+
+  # Número de partições — deve ser igual ou múltiplo do clusterSize
+  # Para local: 1 partição
+  partitionCount: 1
+
+  # Fator de replicação — deve ser <= clusterSize
+  # Para local com 1 broker: replicationFactor deve ser 1
+  replicationFactor: 1
+
+  image:
+    repository: "camunda/camunda"
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "400m"
+      memory: "1Gi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+
+  # Persistência do Zeebe — armazena journals RAFT e snapshots
+  # CRÍTICO: sem persistência, você perde todo o estado ao reiniciar o pod
+  persistenceType: disk
+  pvcSize: "10Gi"
+  pvcStorageClassName: ""  # "" = usa o StorageClass default do cluster (standard no Kind)
+  pvcAccessModes:
+    - ReadWriteOnce
+
+  # JVM — Zeebe é uma JVM app; heap deve ser ~75% do memory limit
+  # 2Gi limit → ~1.5Gi de heap
+  javaOpts: >-
+    -XX:MaxRAMPercentage=75.0
+    -XX:+UseZGC
+    -XX:+ExitOnOutOfMemoryError
+
+  # ----------------------------------------------------------------------------
+  # ServiceMonitor — integração com Prometheus
+  # O Zeebe expõe métricas via endpoint /actuator/prometheus na porta 9600
+  # O ServiceMonitor instrui o Prometheus Operator onde fazer scrape
+  # ----------------------------------------------------------------------------
+  serviceMonitor:
+    enabled: true
+    # CRÍTICO: deve bater com o release name do kube-prometheus-stack
+    # O Prometheus Operator filtra ServiceMonitors por este label
+    labels:
+      release: kube-prometheus-stack
+
+  # Configurações de ambiente do Zeebe
+  env:
+    # Habilita exportador de métricas Prometheus
+    - name: ZEEBE_BROKER_EXPORTERS_PROMETHEUS_CLASSNAME
+      value: "io.camunda.zeebe.broker.exporter.prometheus.PrometheusExporter"
+
+  # Configurações do Zeebe via arquivo de configuração
+  configMap:
+    defaultMode: 0744
+
+  # Elasticsearch exporter — o Zeebe envia dados de processo para o ES
+  # Esses dados são consumidos pelo Operate e Tasklist para exibição
+  exporters:
+    elasticsearch:
+      className: "io.camunda.zeebe.exporter.ElasticsearchExporter"
+      args:
+        url: "http://camunda-elasticsearch-master.camunda-infra.svc.cluster.local:9200"
+        index:
+          prefix: "zeebe-record"
+          createTemplate: true
+        bulk:
+          delay: 5
+          size: 1000
+          memoryLimit: 10485760
+
+  # Service do Zeebe Gateway interno
+  service:
+    type: ClusterIP
+    httpPort: 9600
+    commandPort: 26501
+    internalPort: 26502
+
+  # Readiness/Liveness probes
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 20
+    timeoutSeconds: 1
+
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 120
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+  # Sem nodeSelector/tolerations para local
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # PodDisruptionBudget — garante disponibilidade mínima durante disruptions
+  # Para local com 1 réplica: minAvailable: 0 (não podemos garantir 1 quando só tem 1)
+  podDisruptionBudget:
+    enabled: false
+
+# ===========================================================================
+# ZEEBE GATEWAY — proxy gRPC entre clientes e os brokers Zeebe
+# Os clientes (workers, modelers) nunca falam diretamente com os brokers,
+# sempre passam pelo Gateway
+# ===========================================================================
+zeebeGateway:
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: "camunda/camunda"
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
+  javaOpts: >-
+    -XX:MaxRAMPercentage=75.0
+    -XX:+UseZGC
+    -XX:+ExitOnOutOfMemoryError
+
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+  service:
+    type: ClusterIP
+    # Porta gRPC — usada pelos workers/clientes Zeebe
+    grpcPort: 26500
+    # Porta HTTP REST
+    httpPort: 8080
+
+  # Ingress — desabilitado; acesso via port-forward:
+  # kubectl -n camunda port-forward svc/camunda-zeebe-gateway 26500:26500
+  ingress:
+    enabled: false
+    grpc:
+      enabled: false
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podDisruptionBudget:
+    enabled: false
+
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 20
+    timeoutSeconds: 1
+
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+
+# ===========================================================================
+# OPERATE — UI para monitoramento e operação de instâncias de processo
+# Permite visualizar, inspeciar e resolver incidentes em processos BPMN
+# ===========================================================================
+operate:
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: "camunda/camunda"
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+  javaOpts: >-
+    -XX:MaxRAMPercentage=75.0
+    -XX:+UseZGC
+    -XX:+ExitOnOutOfMemoryError
+
+  # Configuração do Elasticsearch para o Operate
+  elasticsearch:
+    url: "http://camunda-elasticsearch-master.camunda-infra.svc.cluster.local:9200"
+
+  # Configuração do Zeebe — o Operate importa dados do Zeebe via ES
+  zeebe:
+    gatewayAddress: "camunda-zeebe-gateway:26500"
+
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+  service:
+    type: ClusterIP
+    port: 80
+    managementPort: 9600
+
+  # Ingress desabilitado — port-forward:
+  # kubectl -n camunda port-forward svc/camunda-operate 8081:80
+  ingress:
+    enabled: false
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podDisruptionBudget:
+    enabled: false
+
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 20
+    timeoutSeconds: 1
+
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+
+# ===========================================================================
+# TASKLIST — UI para gerenciamento de tarefas humanas (User Tasks)
+# Permite que usuários visualizem, reclamem e completem tarefas atribuídas
+# ===========================================================================
+tasklist:
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: "camunda/camunda"
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+  javaOpts: >-
+    -XX:MaxRAMPercentage=75.0
+    -XX:+UseZGC
+    -XX:+ExitOnOutOfMemoryError
+
+  elasticsearch:
+    url: "http://camunda-elasticsearch-master.camunda-infra.svc.cluster.local:9200"
+
+  zeebe:
+    gatewayAddress: "camunda-zeebe-gateway:26500"
+
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+  service:
+    type: ClusterIP
+    port: 80
+    managementPort: 9600
+
+  ingress:
+    enabled: false
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podDisruptionBudget:
+    enabled: false
+
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 20
+    timeoutSeconds: 1
+
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    successThreshold: 1
+    failureThreshold: 5
+    timeoutSeconds: 1
+
+
+# ===========================================================================
+# OPTIMIZE — Análise e relatórios de performance de processos
+# Consome dados do Elasticsearch para gerar dashboards e KPIs
+# Usa PostgreSQL para armazenar configurações de relatórios/dashboards
+# ===========================================================================
+optimize:
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: "camunda/optimize"
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "300m"
+      # Optimize precisa de pelo menos 1.5Gi para o JVM inicializar sem OOM.
+      # 1Gi era insuficiente: JVM heap (75%) = 768Mi + overhead non-heap → OOMKilled.
+      memory: "1536Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+
+  javaOpts: >-
+    -XX:MaxRAMPercentage=75.0
+    -XX:+UseZGC
+    -XX:+ExitOnOutOfMemoryError
+
+  # A partir do chart 14.0.0 / Camunda 8.9, o Optimize não usa mais PostgreSQL.
+  # O estado dos dashboards/relatórios é armazenado no Elasticsearch.
+  # A configuração correta usa optimize.database.elasticsearch (não optimize.elasticsearch).
+  database:
+    elasticsearch:
+      enabled: true
+      external: true
+      url:
+        protocol: "http"
+        host: "camunda-elasticsearch-master.camunda-infra.svc.cluster.local"
+        port: 9200
+
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+  service:
+    type: ClusterIP
+    port: 80
+    managementPort: 8092
+
+  ingress:
+    enabled: false
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podDisruptionBudget:
+    enabled: false
+
+
+# ===========================================================================
+# IDENTITY — Gerenciamento de identidades, permissões e integração SSO
+# Configura e mantém o realm no Keycloak, registra todos os componentes
+# como clients OAuth2, e controla RBAC da plataforma
+# ===========================================================================
+identity:
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: "camunda/identity"
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  javaOpts: >-
+    -XX:MaxRAMPercentage=75.0
+    -XX:+UseZGC
+    -XX:+ExitOnOutOfMemoryError
+
+  # Configuração do PostgreSQL externo para o Identity.
+  # A partir do chart 14.0.0, o caminho correto é identity.externalDatabase
+  # (sem o prefixo postgresql. que existia em versões anteriores).
+  # "password" foi removido — use secret.inlineSecret para local/dev.
+  externalDatabase:
+    host: "postgresql-identity.camunda-infra.svc.cluster.local"
+    port: 5432
+    database: "identity"
+    username: "identity"
+    secret:
+      inlineSecret: "identity-secret"
+
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+  service:
+    type: ClusterIP
+    port: 80
+    managementPort: 8082
+
+  ingress:
+    enabled: false
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podDisruptionBudget:
+    enabled: false
+
+  firstUser:
+    # Usuário padrão criado automaticamente para acessar a plataforma
+    # Usado para login no Operate, Tasklist, etc.
+    enabled: true
+    username: "demo"
+    email: "demo@local.dev"
+    firstName: "Demo"
+    lastName: "User"
+    # A partir do chart 14.0.0, 'password' foi removido e substituído por 'secret'.
+    # Para local/dev: use inlineSecret (plain-text).
+    # Para produção: use existingSecret + existingSecretKey apontando para um K8s Secret.
+    secret:
+      inlineSecret: "demo"
+
+
+# ===========================================================================
+# WEB MODELER — Editor BPMN/DMN/Form online integrado à plataforma
+# Permite modelar processos diretamente no browser e fazer deploy para o Zeebe
+# Composto por 3 serviços: restapi, webapp, websockets
+# ===========================================================================
+webModeler:
+  enabled: true
+
+  image:
+    # O Web Modeler tem imagens separadas para cada sub-serviço
+    pullPolicy: IfNotPresent
+
+  restapi:
+    image:
+      repository: "camunda/web-modeler-restapi"
+      tag: "8.9.0"
+    resources:
+      requests:
+        cpu: "200m"
+        # Web Modeler restapi (Scala/Spring) precisa de mais memória para inicializar
+        # 512Mi causava OOMKilled — aumentado para 1Gi
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+    # Configuração de e-mail — obrigatória pelo chart mesmo que emails não sejam enviados.
+    # Para local Kind não há SMTP real; o Web Modeler sobe normalmente mas não envia notificações.
+    # Em produção: aponte para um SMTP real (SES, SendGrid, etc.)
+    # ATENÇÃO: a partir do chart 14.0.0, as chaves são FLAT (smtpHost, smtpPort),
+    # não aninhadas sob smtp.host/smtp.port como em versões anteriores.
+    mail:
+      fromAddress: "noreply@camunda.local"
+      fromName: "Camunda Platform (local)"
+      smtpHost: "localhost"
+      smtpPort: 25
+      smtpTlsEnabled: false  # sem TLS em ambiente local
+
+    # PostgreSQL externo para o Web Modeler.
+    # A partir do chart 14.0.0: "user" → "username" e "password" foi removido.
+    # Use secret.inlineSecret para ambiente local; existingSecret em produção.
+    externalDatabase:
+      host: "postgresql-webmodeler.camunda-infra.svc.cluster.local"
+      port: 5432
+      database: "webmodeler"
+      username: "webmodeler"
+      secret:
+        inlineSecret: "webmodeler-secret"
+
+    # Pusher — usado pelo WebSocket do Web Modeler para broadcast de eventos.
+    # Valores fixos garantem que helm upgrade não quebre as conexões WebSocket
+    # (sem valores fixos, o chart gera secrets aleatórios a cada upgrade).
+    # Para local: valores arbitrários são suficientes. Produção: use existingSecret.
+    pusher:
+      secret:
+        inlineSecret: "wm-pusher-secret-local"
+      client:
+        secret:
+          inlineSecret: "wm-pusher-appkey-local"
+
+  webapp:
+    image:
+      repository: "camunda/web-modeler-webapp"
+      tag: "8.9.0"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+  websockets:
+    image:
+      repository: "camunda/web-modeler-websockets"
+      tag: "8.9.0"
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+  ingress:
+    enabled: false
+    webapp:
+      enabled: false
+    websockets:
+      enabled: false
+
+
+# ===========================================================================
+# CONNECTORS — Runtime de conectores para integração com sistemas externos
+# Executa conectores HTTP, REST, GraphQL, AWS, GCP, etc.
+# ===========================================================================
+connectors:
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: "camunda/connectors-bundle"
+    tag: "8.9.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # Inbound connectors — permite que sistemas externos triggem processos Camunda
+  inbound:
+    mode: "disabled"  # Para local: desabilita inbound (requer URL pública)
+    # Em produção: "credentials" ou "oauth"
+
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+  service:
+    type: ClusterIP
+    port: 8080
+    managementPort: 9090
+
+  ingress:
+    enabled: false
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+
+# ===========================================================================
+# ELASTICSEARCH — SUB-CHART DESABILITADO
+# Usamos o Elasticsearch externo instalado via elastic/elasticsearch chart
+# no namespace camunda-infra
+# ===========================================================================
+elasticsearch:
+  # CRÍTICO: desabilitado — não usar o embutido
+  enabled: false
+
+
+# ===========================================================================
+# POSTGRESQL — SUB-CHART DESABILITADO
+# Usamos instâncias PostgreSQL externas instaladas separadamente
+# no namespace camunda-infra
+# ===========================================================================
+postgresql:
+  # CRÍTICO: desabilitado — não usar o embutido
+  enabled: false
+
+
+# ===========================================================================
+# KEYCLOAK — SUB-CHARTS DESABILITADOS
+#
+# keycloak: sub-chart legado (removido no chart 14.0.0, mantido apenas por
+#   compatibilidade com versões muito antigas do chart)
+#
+# identityKeycloak: sub-chart oficial atual (bitnami/keycloak embutido no chart
+#   Camunda). Desabilitado porque usamos o Keycloak externo instalado
+#   separadamente no namespace camunda-infra via keycloak-manifest.yaml.
+#   A conexão com o Keycloak externo é configurada em global.identity.keycloak.
+# ===========================================================================
+keycloak:
+  # CRÍTICO: desabilitado — sub-chart legado, não usar
+  enabled: false
+
+identityKeycloak:
+  # CRÍTICO: desabilitado — usamos Keycloak externo (keycloak.camunda-infra.svc.cluster.local)
+  # A conexão é configurada em global.identity.keycloak (url, contextPath, auth)
+  enabled: false

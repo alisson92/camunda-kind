@@ -1,0 +1,48 @@
+---
+# =============================================================================
+# 00-namespaces.yaml
+#
+# Por que namespaces separados?
+# - Isolamento de RBAC: cada stack tem suas próprias Service Accounts e Roles
+# - Quotas independentes: é possível aplicar ResourceQuota por namespace
+# - Evita colisão de nomes: dois charts podem criar um Service "postgresql"
+#   sem conflito se estiverem em namespaces diferentes
+# - Espelha a estrutura que você teria em produção no EKS, onde cada stack
+#   (infraestrutura, monitoramento, aplicação) vive em seu próprio namespace
+# =============================================================================
+
+# Namespace para os serviços de infraestrutura que o Camunda consome:
+# Elasticsearch, PostgreSQL (3 instâncias) e Keycloak
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: camunda-infra
+  labels:
+    # Label usado pelo kube-prometheus-stack para descobrir ServiceMonitors
+    # neste namespace (necessário se quisermos monitorar a infra também)
+    monitoring: "true"
+    environment: "local"
+
+---
+# Namespace principal do Camunda Platform 8.9
+# Todos os componentes da orquestração vivem aqui:
+# Zeebe, Operate, Tasklist, Optimize, Identity, Web Modeler, Connectors
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: camunda
+  labels:
+    monitoring: "true"
+    environment: "local"
+
+---
+# Namespace dedicado para o kube-prometheus-stack
+# Prometheus, Grafana, Alertmanager e todos os exporters ficam aqui
+# Separar do Camunda garante que o monitoramento sobrevive a um
+# eventual teardown e reinstall do Camunda
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    environment: "local"

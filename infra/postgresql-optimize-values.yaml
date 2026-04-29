@@ -1,0 +1,53 @@
+# =============================================================================
+# infra/postgresql-optimize-values.yaml
+#
+# Chart: bitnami/postgresql
+# Instância: PostgreSQL dedicada ao componente Optimize do Camunda
+#
+# O Optimize usa PostgreSQL para armazenar:
+# - Configurações de relatórios e dashboards
+# - Definições de alertas e notificações
+# - Dados de configuração de coleções e filtros
+#
+# IMPORTANTE: O Optimize também usa o Elasticsearch (a mesma instância que
+# o restante do Camunda) para armazenar dados de eventos de processo e
+# métricas de performance. O PostgreSQL do Optimize é complementar ao ES,
+# armazenando apenas metadados de configuração da UI.
+#
+# Por ser workload de analytics/reporting, o Optimize pode ter queries
+# mais pesadas que o Identity — sizing levemente superior
+# =============================================================================
+
+auth:
+  database: "optimize"
+  username: "optimize"
+  password: "optimize-secret"
+  postgresPassword: "postgres-admin-secret"
+
+primary:
+  resources:
+    requests:
+      cpu: "150m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  persistence:
+    enabled: true
+    size: "2Gi"
+
+  configuration: |
+    # Aceita conexões de qualquer interface — necessário para pods cross-namespace
+    listen_addresses = '*'
+    # Optimize pode ter queries de agregação mais complexas
+    # work_mem maior ajuda em sort/hash operations
+    shared_buffers = 128MB
+    work_mem = 8MB
+    max_connections = 50
+    log_min_duration_statement = 1000
+
+architecture: standalone
+
+metrics:
+  enabled: false
